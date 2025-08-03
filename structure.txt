@@ -1,0 +1,19 @@
+penny/
+├── main.py
+├── pages/
+│   ├── login.py
+│   ├── signup.py
+│   ├── planning.py
+│   ├── tracking.py
+│   ├── dashboard.py
+│   ├── settings.py
+├── utils/
+│   ├── database.py
+│   ├── logging.py
+├── styles.py
+├── penny.db
+├── penny_errors.log
+├── TERMS_AND_CONDITIONS.md
+├── PRIVACY_POLICY.md
+├── README.md
+├── LICENSE
