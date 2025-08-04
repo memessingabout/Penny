@@ -66,12 +66,14 @@ class Database:
             CREATE TABLE IF NOT EXISTS plans (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
-                month TEXT NOT NULL,
+                period TEXT NOT NULL,
                 type TEXT NOT NULL,
                 category TEXT NOT NULL,
                 amount INTEGER NOT NULL,
                 recurrence TEXT,
                 due TEXT,
+                custom_period TEXT,
+                UNIQUE(user_id, period, type, category),
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
         """)
@@ -390,12 +392,9 @@ class Database:
                 log_error(user_id, f"Cannot delete category {type}/{category}: used in transactions")
                 return False
             self.cursor.execute(
-                "SELECT 1 FROM plans WHERE user_id = ? AND type = ? AND category = ?",
+                "DELETE FROM plans WHERE user_id = ? AND type = ? AND category = ?",
                 (user_id, type, category)
             )
-            if self.cursor.fetchone():
-                log_error(user_id, f"Cannot delete category {type}/{category}: used in plans")
-                return False
             self.cursor.execute(
                 "DELETE FROM categories WHERE user_id = ? AND type = ? AND category = ?",
                 (user_id, type, category)
@@ -407,58 +406,139 @@ class Database:
             log_error(user_id, f"Delete category failed: {str(e)}")
             return False
 
-    def get_plans(self, user_id, month):
-        """Retrieve budget plans for a user and month."""
+    def get_plans(self, user_id, period):
+        """Retrieve budget plans for a user and period."""
         try:
-            if month.startswith("Total"):
-                year = month.split()[-1]
-                query = "SELECT type, category, SUM(amount), recurrence, due FROM plans WHERE user_id = ? AND month LIKE ? GROUP BY type, category, recurrence, due ORDER BY type, SUM(amount) DESC"
+            if period.startswith("Total"):
+                year = period.split()[-1]
+                query = """
+                    SELECT type, category, SUM(amount), recurrence, due
+                    FROM plans
+                    WHERE user_id = ? AND period LIKE ?
+                    GROUP BY type, category, recurrence, due
+                    ORDER BY type, SUM(amount) DESC
+                """
                 params = (user_id, f"% {year}")
             else:
-                query = "SELECT type, category, amount, recurrence, due FROM plans WHERE user_id = ? AND month = ? ORDER BY type, amount DESC"
-                params = (user_id, month)
+                query = """
+                    SELECT type, category, amount, recurrence, due
+                    FROM plans
+                    WHERE user_id = ? AND period = ?
+                    ORDER BY type, amount DESC
+                """
+                params = (user_id, period)
             self.cursor.execute(query, params)
             plans = self.cursor.fetchall()
-            log_debug(user_id, f"Retrieved plans for {month}: {len(plans)} entries")
+            log_debug(user_id, f"Retrieved plans for {period}: {len(plans)} entries")
             return plans
         except sqlite3.Error as e:
             log_error(user_id, f"Error retrieving plans: {str(e)}")
             return []
 
-    def add_plan(self, user_id, month, type, category, amount, recurrence, due):
-        """Add a budget plan for a user."""
+    def add_plan(self, user_id, period, type, category, amount, recurrence, due, custom_period=None):
+        """Add or update a budget plan for a user."""
         try:
             self.cursor.execute(
-                "INSERT INTO plans (user_id, month, type, category, amount, recurrence, due) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (user_id, month, type, category, amount, recurrence, due)
+                """
+                INSERT OR REPLACE INTO plans (user_id, period, type, category, amount, recurrence, due, custom_period)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, period, type, category, amount, recurrence, due, custom_period)
             )
             self.add_category(user_id, type, category)
             self.conn.commit()
-            log_info(user_id, f"Added plan: {month}, {type}/{category}, KSh {amount}")
+            log_info(user_id, f"Added plan: {period}, {type}/{category}, KSh {amount}")
             return True
         except sqlite3.Error as e:
             log_error(user_id, f"Add plan failed: {str(e)}")
             return False
 
-    def copy_plan(self, user_id, from_month, to_month):
-        """Copy budget plans from one month to another."""
+    def copy_plan(self, user_id, from_period, to_period):
+        """Copy budget plans from one period to another."""
         try:
             self.cursor.execute(
-                "SELECT type, category, amount, recurrence, due FROM plans WHERE user_id = ? AND month = ?",
-                (user_id, from_month)
+                """
+                SELECT type, category, amount, recurrence, due, custom_period
+                FROM plans
+                WHERE user_id = ? AND period = ?
+                """,
+                (user_id, from_period)
             )
             plans = self.cursor.fetchall()
             for plan in plans:
                 self.cursor.execute(
-                    "INSERT INTO plans (user_id, month, type, category, amount, recurrence, due) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (user_id, to_month, *plan)
+                    """
+                    INSERT INTO plans (user_id, period, type, category, amount, recurrence, due, custom_period)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (user_id, to_period, *plan)
                 )
             self.conn.commit()
-            log_info(user_id, f"Copied plan from {from_month} to {to_month}")
+            log_info(user_id, f"Copied plan from {from_period} to {to_period}")
             return True
         except sqlite3.Error as e:
             log_error(user_id, f"Copy plan failed: {str(e)}")
             return False
+
+    def has_december_plan(self, user_id, year):
+        """Check if a plan exists for December of the given year."""
+        try:
+            self.cursor.execute(
+                "SELECT COUNT(*) FROM plans WHERE user_id = ? AND period = ?",
+                (user_id, f"December {year}")
+            )
+            count = self.cursor.fetchone()[0]
+            log_debug(user_id, f"Checked December {year} plan: {'exists' if count > 0 else 'not found'}")
+            return count > 0
+        except sqlite3.Error as e:
+            log_error(user_id, f"Error checking December plan: {str(e)}")
+            return False
+
+    def get_plan_amount(self, user_id, period, type, category):
+        """Get the amount for a specific plan."""
+        try:
+            self.cursor.execute(
+                """
+                SELECT amount
+                FROM plans
+                WHERE user_id = ? AND period = ? AND type = ? AND category = ?
+                """,
+                (user_id, period, type, category)
+            )
+            result = self.cursor.fetchone()
+            amount = result[0] if result else None
+            log_debug(user_id, f"Retrieved amount for {period}, {type}/{category}: {amount}")
+            return amount
+        except sqlite3.Error as e:
+            log_error(user_id, f"Error retrieving plan amount: {str(e)}")
+            return None
+
+    def get_plan_details(self, user_id, period, type, category):
+        """Get all details for a specific plan."""
+        try:
+            self.cursor.execute(
+                """
+                SELECT amount, recurrence, due, custom_period
+                FROM plans
+                WHERE user_id = ? AND period = ? AND type = ? AND category = ?
+                """,
+                (user_id, period, type, category)
+            )
+            result = self.cursor.fetchone()
+            if result:
+                details = {
+                    "amount": result[0],
+                    "recurrence": result[1],
+                    "due": result[2],
+                    "custom_period": result[3]
+                }
+                log_debug(user_id, f"Retrieved plan details for {period}, {type}/{category}: {details}")
+                return details
+            log_debug(user_id, f"No plan details found for {period}, {type}/{category}")
+            return None
+        except sqlite3.Error as e:
+            log_error(user_id, f"Error retrieving plan details: {str(e)}")
+            return None
 
     def get_transactions(self, user_id, date_filter, start_date=None, end_date=None):
         """Retrieve transactions based on a date filter."""
@@ -534,7 +614,7 @@ class Database:
         """Add a new transaction for a user."""
         try:
             self.cursor.execute(
-                "SELECT 1 FROM plans WHERE user_id = ? AND type = ? AND category = ? AND month = ?",
+                "SELECT 1 FROM plans WHERE user_id = ? AND type = ? AND category = ? AND period = ?",
                 (user_id, type, category, datetime.now().strftime("%B %Y"))
             )
             flagged = 0 if self.cursor.fetchone() else 1

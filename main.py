@@ -42,7 +42,7 @@ class PennyApp(tk.Tk):
                 page.pack_forget()
 
         self.geometry("400x500")
-        self.wm_state('normal')  # Ensure the window is not maximized
+        #self.wm_state('iconic')
         self.center_window(400, 500)
 
     def center_window(self, width, height):
